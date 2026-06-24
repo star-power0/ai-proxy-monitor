@@ -1,6 +1,6 @@
 # AI 中转站监控大屏
 
-> 一个赛博朋克风格的桌面/网页监控面板，与 [ccswitch](https://github.com/CCBluX/cc-switch) 深度集成，实时抓取所有 AI 中转站的余额、分组倍率与健康状态。
+> 一个赛博朋克风格的桌面/网页监控面板，与 [ccswitch](https://github.com/smalltomatowater-boop/ccswitch) 深度集成，实时抓取所有 AI 中转站的余额、分组倍率与健康状态。
 
 ![界面预览](https://raw.githubusercontent.com/star-power0/ai-proxy-monitor/main/preview.png)
 
@@ -66,6 +66,46 @@ build.bat
 
 > [!WARNING]
 > **EXE 不可单独移出目录！** 采用 `--onedir` 模式打包，EXE 依赖同级目录下的 DLL 和静态资源。如需桌面快捷方式，请**右键 EXE → 发送到 → 桌面快捷方式**，不要直接复制 EXE 到桌面。
+
+---
+
+## 📦 下载 Release 直接使用（推荐）
+
+无需 Python 环境，适合 Windows 用户直接体验。
+
+👉 **[前往 Releases 页面下载](https://github.com/star-power0/ai-proxy-monitor/releases)**
+
+### 下载后的使用步骤
+
+**第一步：解压 ZIP 包**
+
+下载 `AI中转站监控大屏-v1.0.0-windows-x64.zip`，解压到任意位置（如 `D:\AI监控大屏\`）。
+
+> [!IMPORTANT]
+> 解压后的整个文件夹不能拆开，请保持目录结构完整。
+
+**第二步：确认前置条件**
+
+| 前置条件 | 说明 |
+|----------|------|
+| ✅ 已安装 [ccswitch](https://github.com/smalltomatowater-boop/ccswitch) | 大屏通过 ccswitch 的本地数据库读取站点信息 |
+| ✅ 已安装 Google Chrome | 用于余额抓取（无需额外配置，程序自动查找路径） |
+
+**第三步：以调试模式启动 Chrome（9222 端口），登录各中转站账号**
+
+可直接运行项目中的 `start-monitor.bat`，或手动执行：
+```bash
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.ai-proxy-monitor\ChromeDevToolsProfile"
+```
+在弹出的 Chrome 窗口中，依次登录你的各个 AI 中转站账号。
+
+**第四步：双击 EXE 启动大屏**
+
+双击解压目录中的 `AI中转站监控大屏.exe`，大屏窗口自动弹出，站点列表即刻加载。
+
+**第五步：点击「手动刷新」完成首次检测**
+
+点击顶部「手动刷新」按钮，程序将连接 9222 端口的 Chrome 实例，自动抓取所有站点的余额和分组倍率。
 
 ---
 
