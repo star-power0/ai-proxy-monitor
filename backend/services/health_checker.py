@@ -4,7 +4,9 @@
 利用免登状态静默打开中转站后台，拦截 API 响应包，获取真实的余额、分组及倍率。
 """
 import asyncio
+import json
 import os
+import re
 import socket
 import subprocess
 from datetime import datetime
@@ -12,6 +14,7 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 CDP_URL = "http://127.0.0.1:9222"
+PROBE_CACHE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "probe_cache.json"))
 
 BALANCE_KEYS = [
     "balance",
@@ -116,6 +119,41 @@ def _extract_price_map(data):
 
     return {}
 
+
+def _load_probe_cache() -> dict:
+    try:
+        with open(PROBE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_probe_cache(cache: dict):
+    os.makedirs(os.path.dirname(PROBE_CACHE_PATH), exist_ok=True)
+    with open(PROBE_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+
+def _remember_balance_path(host: str, url: str):
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return
+    cache = _load_probe_cache()
+    cache.setdefault(host, {})["balance_path"] = parsed.path or "/"
+    _save_probe_cache(cache)
+
+
+def _get_cached_probe_url(host: str, web_url: str):
+    cache = _load_probe_cache()
+    cached_path = cache.get(host, {}).get("balance_path")
+    if not cached_path:
+        return None
+    parsed = urlparse(web_url)
+    root = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
+    return f"{root}/{cached_path.strip('/')}".rstrip("/")
+
+
 def _get_web_url(station: dict) -> str:
     """清洗出站点的网页控制台/官网主站 URL"""
     if station.get("website_url"):
@@ -158,8 +196,69 @@ def _get_web_url(station: dict) -> str:
         return "https://vsllm.com/console/topup?tab=topup"
     if "proxy-gls.de5.net" in url_lower:
         return "https://api-public.proxy-gls.de5.net/wallet"
-        
+
     return url
+
+
+def _build_probe_urls(web_url: str, cached_url: str | None = None) -> list[str]:
+    parsed = urlparse(web_url)
+    root = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
+    urls = []
+    if cached_url:
+        urls.append(cached_url.rstrip("/"))
+    if parsed.path and parsed.path != "/":
+        urls.append(web_url.rstrip("/"))
+    for path in ("/dashboard", "/console", "/wallet", "/topup", "/profile", "/"):
+        urls.append(f"{root}{path}".rstrip("/"))
+    return list(dict.fromkeys(urls))
+
+
+def _extract_dom_balance_text(text: str):
+    if not text:
+        return None
+    labels = "当前余额|账户余额|剩余余额|可用余额|充值余额|余额|剩余配额|可用额度|剩余额度|剩余金额|Balance|Quota|Credit"
+    pattern = re.compile(rf"(?:{labels})[\s\S]{{0,40}}?(?:¥|￥|\$)?\s*([0-9][0-9,]*(?:\.\d+)?)", re.IGNORECASE)
+    for match in pattern.finditer(text):
+        snippet = match.group(0)
+        if any(word in snippet for word in ("小时", "天", "限制", "重置", "窗口", "上限", "请求", "次数", "Tokens", "RPM", "TPM")):
+            continue
+        try:
+            return float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_dom_groups_text(text: str) -> dict:
+    if not text:
+        return {}
+    groups = {}
+    for match in re.finditer(r"([一-龥A-Za-z0-9_\-\[\]【】（）() ]{1,40})\s*([0-9]+(?:\.[0-9]+)?)\s*x\b", text, re.IGNORECASE):
+        name = match.group(1).strip(" ：:|-\n\t") or f"{match.group(2)}x"
+        ratio = float(match.group(2))
+        key = name.lower()
+        groups[key] = {"name": name, "ratio": ratio}
+    return groups
+
+
+async def _dismiss_page_overlays(page):
+    try:
+        await page.keyboard.press("Escape")
+        await page.evaluate("""() => {
+            const keywords = ['今日不再', '不再提示', '我知道', '知道了', '关闭', '确定', 'Close', 'OK'];
+            const controls = Array.from(document.querySelectorAll('button, a, [role="button"]')).reverse();
+            for (const el of controls) {
+                const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+                if (keywords.some(kw => text.includes(kw))) {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
 
 
 async def check_station_health_with_playwright(context, station: dict) -> dict:
@@ -183,6 +282,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
 
     # 2. 清洗出真正的 Web 页面 URL
     web_url = _get_web_url(station)
+    host = parsed_url.netloc.lower() or base_url.lower()
+    cached_probe_url = _get_cached_probe_url(host, web_url)
 
     result = {
         "status": "unknown",
@@ -228,7 +329,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
             goto_url = f"{web_url.rstrip('/')}/dashboard"
             
         await page.goto(goto_url, timeout=10000, wait_until="domcontentloaded")
-        
+        await _dismiss_page_overlays(page)
+
         # 4. 判断是否进入了 Chrome 错误页面 (ERR_NAME_NOT_RESOLVED 等)
         title = await page.title()
         body_text = await page.evaluate("() => document.body.innerText")
@@ -369,21 +471,16 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                 }
             } catch(e) {}
 
-            // 1. 同源 fetch /api/user/self 或新系统的 /api/v1/auth/me
-            try {
-                const r = await fetch('/api/user/self', { headers, credentials: 'same-origin' });
-                if (r.ok) {
-                    resData.user = await r.json();
-                } else {
-                    const r2 = await fetch('/api/user/info', { headers, credentials: 'same-origin' });
-                    if (r2.ok) {
-                        resData.user = await r2.json();
-                    } else {
-                        const r3 = await fetch('/api/v1/auth/me', { headers, credentials: 'same-origin' });
-                        if (r3.ok) resData.user = await r3.json();
+            // 1. 同源 fetch 常见用户接口
+            for (const endpoint of ['/api/user/self', '/api/user/info', '/api/user/dashboard', '/api/user/quota', '/api/user/token', '/api/v1/auth/me']) {
+                try {
+                    const r = await fetch(endpoint, { headers, credentials: 'same-origin' });
+                    if (r.ok) {
+                        resData.user = await r.json();
+                        break;
                     }
-                }
-            } catch(e) {}
+                } catch(e) {}
+            }
 
             // 2. 同源 fetch /api/pricing
             try {
@@ -505,59 +602,56 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
 
         # 7. 判定在线状态与 DOM 正则解析兜底 (主要对应 DeepSeek 等官方站与复杂页面)
         # 只要 API 轨道未获得有效余额，即降级执行 DOM 提取进行数据补充
+        final_dom_text = await page.evaluate("() => document.body.innerText")
         if result["balance"] is None:
-            dom_balance = await page.evaluate(r"""async () => {
-                // 循环等待渲染，最多等 8 秒
-                for (let i = 0; i < 40; i++) {
-                    const text = document.body.innerText;
-                    const hasPasswordInput = !!document.querySelector('input[type="password"]');
-                    const hasLoggedInMenu = text.includes("数据看板") || 
-                                            text.includes("个人设置") || 
-                                            text.includes("API令牌") || 
-                                            text.includes("令牌管理") || 
-                                            text.includes("控制台") || 
-                                            text.includes("钱包") || 
-                                            text.includes("使用日志");
-                    
-                    // 判定是否是未登录状态的登录/注册界面
-                    const isLoginPage = hasPasswordInput || 
-                                        (!hasLoggedInMenu && (
-                                            (text.includes("登录") || text.includes("Sign in")) && 
-                                            (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
-                                        ));
-                    if (isLoginPage) {
-                        return null; // 未登录，直接退出，防止误提取广告宣传语如 "注册赠送 24 元额度"
-                    }
-                    
-                    // 全局正则匹配，寻找并筛选真正的余额项，在数字后允许向后抓取 8 个字符以囊括可能存在的单位（如“小时”）用于排除逻辑
-                    const regex = /(?:充值余额|可用余额|余额|可用额度|额度|义气值|积分|点数|可用点数|Balance|Quota|Credit)[\s\S]{0,15}?(?:¥|\$)?\s*([0-9,.]+)[\s\S]{0,8}/gi;
-                    let match;
-                    let foundBalance = null;
-                    while ((match = regex.exec(text)) !== null) {
-                        const fullText = match[0];
-                        const valStr = match[1];
-                        // 过滤常见的各种用量时间窗/限制等干扰数字
-                        if (fullText.includes("小时") || fullText.includes("天") || fullText.includes("限制") || 
-                            fullText.includes("hour") || fullText.includes("day") || fullText.includes("limit") ||
-                            fullText.includes("重置") || fullText.includes("reset") || fullText.includes("窗口") ||
-                            fullText.includes("window") || fullText.includes("上限") || fullText.includes("max")) {
-                            continue;
-                        }
-                        foundBalance = valStr;
-                        break;
-                    }
-                    if (foundBalance) {
-                        return foundBalance;
-                    }
-                    await new Promise(r => setTimeout(r, 200));
-                }
-                return null;
-            }""")
-            if dom_balance:
+            probe_urls = _build_probe_urls(web_url, cached_probe_url)
+            dom_texts = [final_dom_text]
+            for probe_url in probe_urls:
                 try:
-                    result["balance"] = float(dom_balance.replace(",", ""))
+                    if page.url.rstrip("/") != probe_url.rstrip("/"):
+                        await page.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
+                    await _dismiss_page_overlays(page)
+                    await asyncio.sleep(1.0)
+                    dom_text = await page.evaluate("""async () => {
+                        for (let i = 0; i < 25; i++) {
+                            const text = document.body.innerText;
+                            const hasPasswordInput = !!document.querySelector('input[type="password"]');
+                            const hasLoggedInMenu = text.includes("数据看板") ||
+                                                    text.includes("个人设置") ||
+                                                    text.includes("API令牌") ||
+                                                    text.includes("令牌管理") ||
+                                                    text.includes("控制台") ||
+                                                    text.includes("钱包") ||
+                                                    text.includes("账户数据") ||
+                                                    text.includes("使用日志");
+                            const isLoginPage = hasPasswordInput ||
+                                                (!hasLoggedInMenu && (
+                                                    (text.includes("登录") || text.includes("Sign in")) &&
+                                                    (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
+                                                ));
+                            if (isLoginPage) return "";
+                            if (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota")) {
+                                return text;
+                            }
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                        return document.body.innerText;
+                    }""")
+                    if dom_text:
+                        dom_texts.append(dom_text)
+                    dom_balance = _extract_dom_balance_text(dom_text)
+                    if dom_balance is not None:
+                        result["balance"] = dom_balance
+                        final_dom_text = dom_text
+                        _remember_balance_path(host, page.url)
+                        break
                 except Exception:
-                    pass
+                    continue
+
+        if not result["groups_info"]:
+            dom_groups = _extract_dom_groups_text(final_dom_text)
+            if dom_groups:
+                result["groups_info"] = dom_groups
 
         # 8. 最终判定在线状态和归类数据来源说明
         if result["balance"] is not None or pricing_data:

@@ -2,6 +2,7 @@ const API = window.location.protocol === "file:" ? "http://127.0.0.1:8084" : win
 
 let stations = [];
 let checkRunning = false;
+let stationRefreshRunning = null;
 
 async function load() {
   const res = await fetch(`${API}/api/status`);
@@ -26,6 +27,28 @@ async function refresh() {
     checkRunning = false;
   }
 }
+
+async function refreshStation(host) {
+  if (checkRunning || stationRefreshRunning) return;
+  stationRefreshRunning = host;
+  const btn = document.querySelector(`[data-refresh-host="${CSS.escape(host)}"]`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "检测中";
+  }
+  try {
+    const res = await fetch(`${API}/api/health/${encodeURIComponent(host)}`);
+    const updatedStation = await res.json();
+    if (updatedStation && !updatedStation.error) {
+      stations = stations.map(station => station.host === host ? updatedStation : station);
+      render();
+    }
+  } finally {
+    stationRefreshRunning = null;
+  }
+}
+
+window.refreshStation = refreshStation;
 
 function isAnomaly(station) {
   return station.status !== "online";
@@ -246,6 +269,7 @@ function stationCardHtml(station, index = 0) {
       </div>
     </div>
     <div class="card-header-right">
+      <button class="btn-refresh-station" data-refresh-host="${escapeHtml(station.host)}" onclick="event.stopPropagation(); window.refreshStation('${escapeJs(station.host)}')">单刷</button>
       <div class="station-balance-label">余额</div>
       <div class="station-balance ${balanceClass}">${balanceText}</div>
     </div>
@@ -825,8 +849,16 @@ window.triggerLoginHelper = async function(url) {
     const res = await fetch(`${API}/api/login_channel?url=${encodeURIComponent(url)}`);
     const data = await res.json();
     if (data.success) {
-      await showModal('✅', '登录成功', '登录窗口已关闭，正在重新检测以同步最新余额...', '开始刷新', 'modal-btn-ok');
-      await refresh(); 
+      const shouldRefresh = await showConfirm(
+        '✅',
+        '登录成功',
+        '登录窗口已关闭。<br><br>如果你还要继续补录其它站点，可以先取消，全部补录完后再点顶部“手动刷新”。',
+        '开始检测',
+        '取消'
+      );
+      if (shouldRefresh) {
+        await refresh();
+      }
     } else {
       await showModal('⚠️', '登录辅助失败', '错误详情：<br><code style="font-size:12px;color:#f87171;word-break:break-all">' + escapeHtml(data.error || '未知原因') + '</code>', '知道了', 'modal-btn-err');
     }

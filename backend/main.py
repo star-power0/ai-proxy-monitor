@@ -267,6 +267,25 @@ async def run_health_check():
     return _build_station_list(_check_cache)
 
 
+@app.get("/api/health/{host}")
+async def run_station_health_check(host: str):
+    global _check_cache
+    target_groups = [group for group in _raw_group_cache if _host_from_url(group["base_url"]) == host.lower()]
+    if not target_groups:
+        return {"error": "station not found"}
+
+    checked_groups = await check_all_stations(target_groups, concurrency=1)
+    _save_check_history(checked_groups)
+
+    checked_ids = {group["id"] for group in checked_groups}
+    cached_by_id = {group["id"]: group for group in _check_cache if group["id"] not in checked_ids}
+    for group in checked_groups:
+        cached_by_id[group["id"]] = group
+    _check_cache = list(cached_by_id.values())
+
+    return _build_station_view(checked_groups)
+
+
 @app.get("/api/login_channel")
 async def login_channel(url: str):
     """

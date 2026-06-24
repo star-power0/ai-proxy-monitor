@@ -544,6 +544,30 @@ body::after {
   border-radius: 14px;
 }
 
+.btn-refresh-station {
+  display: block;
+  margin: 0 0 6px auto;
+  padding: 5px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  background: rgba(56, 189, 248, 0.06);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.btn-refresh-station:hover {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.btn-refresh-station:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .station-balance-label {
   font-size: 10px;
   color: var(--muted);
