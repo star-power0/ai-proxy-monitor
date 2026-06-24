@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+sqlite-utils
+pydantic
+playwright>=1.40.0
+
+
