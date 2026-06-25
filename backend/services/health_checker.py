@@ -216,16 +216,25 @@ def _build_probe_urls(web_url: str, cached_url: str | None = None) -> list[str]:
 def _extract_dom_balance_text(text: str):
     if not text:
         return None
-    labels = "当前余额|账户余额|剩余余额|可用余额|充值余额|余额|剩余配额|可用额度|剩余额度|剩余金额|Balance|Quota|Credit"
+    labels = "当前余额|账户余额|剩余余额|可用余额|充值余额|信用余额|余额|剩余额度|可用额度|剩余额度|可用积分|剩余金额|Balance|Quota|Credit|额度"
     pattern = re.compile(rf"(?:{labels})[\s\S]{{0,40}}?(?:¥|￥|\$)?\s*([0-9][0-9,]*(?:\.\d+)?)", re.IGNORECASE)
+    candidates = []
     for match in pattern.finditer(text):
         snippet = match.group(0)
         if any(word in snippet for word in ("小时", "天", "限制", "重置", "窗口", "上限", "请求", "次数", "Tokens", "RPM", "TPM")):
             continue
+        # Filter out promotional / pricing text
+        if any(word in snippet for word in ("满", "送", "减", "赠", "折", "优惠", "抢", "仅需", "起", "元/月", "元/年", "充值送", "消费", "冻结", "锁定")):
+            continue
+        # Real balance displays are short; long snippets are likely marketing copy
+        if len(snippet) > 30:
+            continue
         try:
-            return float(match.group(1).replace(",", ""))
+            candidates.append(float(match.group(1).replace(",", "")))
         except ValueError:
             continue
+    if candidates:
+        return min(candidates)
     return None
 
 
