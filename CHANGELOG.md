@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-06-26
+
+- 修复：补齐 health_checker.py 缺失的 sys 导入，避免后端导入时因 `_MEIPASS` 路径判断崩溃，导致 EXE 窗口已打开但 8084 服务未启动。
+- 修复：打包脚本现在会先安装 backend/requirements.txt，避免 EXE 缺失 FastAPI / Uvicorn / Playwright 运行依赖。
+- 修复：PyInstaller spec 显式加入 FastAPI、Uvicorn、Starlette、Pydantic、Playwright 的 hiddenimports，避免窗口模式下后端线程静默起不来。
+- 修复：打包入口改为直接使用现成 spec，减少命令行参数分叉导致的漏包风险。
+
 ## 0.3.0 - 2026-06-25
 
 - 重写：DOM 余额提取算法 v5。彻底放弃全文正则猜数字的策略，改为遍历 DOM 文本节点 + 标签优先级字典 + 上下文窗口扫描。

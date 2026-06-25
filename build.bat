@@ -2,13 +2,16 @@
 title AI Proxy Monitor Builder
 cd /d "%~dp0"
 
+setlocal
+
 echo [1/3] Preparing environment...
-.venv\Scripts\pip.exe install pyinstaller pywebview
+call .venv\Scripts\pip.exe install -r backend\requirements.txt pyinstaller pywebview
+if errorlevel 1 exit /b 1
 
 echo.
 echo [2/3] Packing application into desktop EXE...
-echo (Including FastAPI service, Webview2 layout, and static pages)
-.venv\Scripts\pyinstaller.exe --noconfirm --onedir --windowed --add-data "frontend;frontend" --add-data "backend;backend" --add-data "logo.ico;." --icon="logo.ico" --name "AI中转站监控大屏" run_app.py
+call .venv\Scripts\pyinstaller.exe --noconfirm --clean --distpath dist --workpath build "AI中转站监控大屏.spec"
+if errorlevel 1 exit /b 1
 
 echo.
 echo [3/3] Package complete!
@@ -16,4 +19,4 @@ echo ====================================================
 echo The standalone EXE has been compiled at:
 echo dist\AI中转站监控大屏\AI中转站监控大屏.exe
 echo ====================================================
-pause
+exit /b 0

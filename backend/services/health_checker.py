@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 from datetime import datetime
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
