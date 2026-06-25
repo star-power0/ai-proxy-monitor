@@ -639,42 +639,48 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     if page.url.rstrip("/") != probe_url.rstrip("/"):
                         await page.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
                     await _dismiss_page_overlays(page)
-                    await asyncio.sleep(1.0)
-                    dom_text = await page.evaluate("""async () => {
-                        for (let i = 0; i < 25; i++) {
-                            const text = document.body.innerText;
-                            const hasPasswordInput = !!document.querySelector('input[type="password"]');
-                            const hasLoggedInMenu = text.includes("数据看板") ||
-                                                    text.includes("个人设置") ||
-                                                    text.includes("API令牌") ||
-                                                    text.includes("令牌管理") ||
-                                                    text.includes("控制台") ||
-                                                    text.includes("钱包") ||
-                                                    text.includes("账户数据") ||
-                                                    text.includes("使用日志") ||
-                                                    text.includes("我的余额") ||
-                                                    text.includes("账户信息");
-                            const isLoginPage = hasPasswordInput ||
-                                                (!hasLoggedInMenu && (
-                                                    (text.includes("登录") || text.includes("Sign in")) &&
-                                                    (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
-                                                ));
-                            if (isLoginPage) return "";
-                            // Only extract balance if page confirms user is logged in
-                            if (hasLoggedInMenu && (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota"))) {
-                                return text;
+                    # Retry up to 3 times: SPA pages may need extra time to render balance
+                    for _retry in range(3):
+                        await asyncio.sleep(1.5 if _retry > 0 else 1.0)
+                        dom_text = await page.evaluate("""async () => {
+                            for (let i = 0; i < 20; i++) {
+                                const text = document.body.innerText;
+                                const hasPasswordInput = !!document.querySelector('input[type="password"]');
+                                const hasLoggedInMenu = text.includes("数据看板") ||
+                                                        text.includes("个人设置") ||
+                                                        text.includes("API令牌") ||
+                                                        text.includes("令牌管理") ||
+                                                        text.includes("控制台") ||
+                                                        text.includes("钱包") ||
+                                                        text.includes("账户数据") ||
+                                                        text.includes("使用日志") ||
+                                                        text.includes("我的余额") ||
+                                                        text.includes("账户信息");
+                                const isLoginPage = hasPasswordInput ||
+                                                    (!hasLoggedInMenu && (
+                                                        (text.includes("登录") || text.includes("Sign in")) &&
+                                                        (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
+                                                    ));
+                                if (isLoginPage) return "";
+                                if (hasLoggedInMenu && (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota"))) {
+                                    return text;
+                                }
+                                await new Promise(r => setTimeout(r, 200));
                             }
-                            await new Promise(r => setTimeout(r, 200));
-                        }
-                        return document.body.innerText;
-                    }""")
-                    if dom_text:
-                        dom_texts.append(dom_text)
-                    dom_balance = _extract_dom_balance_text(dom_text)
-                    if dom_balance is not None:
-                        result["balance"] = dom_balance
-                        final_dom_text = dom_text
-                        _remember_balance_path(host, page.url)
+                            return document.body.innerText;
+                        }""")
+                        if not dom_text:
+                            break
+                        dom_balance = _extract_dom_balance_text(dom_text)
+                        if dom_balance is not None:
+                            result["balance"] = dom_balance
+                            final_dom_text = dom_text
+                            _remember_balance_path(host, page.url)
+                            break
+                        _balance_hints = ("当前余额", "账户余额", "余额", "剩余额度", "可用额度", "Balance", "Quota", "Credit", "额度")
+                        if any(hint in dom_text for hint in _balance_hints):
+                            dom_texts.append(dom_text)
+                    if result["balance"] is not None:
                         break
                 except Exception:
                     continue
