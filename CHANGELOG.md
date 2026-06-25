@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3 - 2026-06-25
+
+- 修复：分组倍率提取时，若 API 返回非数值字符串（如 "自动"），不再整体崩溃，改为回退默认倍率 1.0。
+- 修复：`group_ratio` / `usable_group` 增加 `isinstance(dict)` 类型守卫，防止 API 返回 list 时 `.items()` 崩溃。
+- 修复：Playwright `page` 变量提前初始化为 `None`，`finally` 块中统一做 None 检查，防止 `new_page()` 失败后 `NameError`。
+- 影响范围：New API group_ratio、New API user/groups、Sub2API rate_multiplier 三处提取路径均已加固。
+
 ## 0.2.2 - 2026-06-25
 
 - 站点卡片新增“单刷”按钮，可只刷新当前站点，保留全局“手动刷新”不变。

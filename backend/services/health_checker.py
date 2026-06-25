@@ -315,11 +315,12 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
             except Exception:
                 pass
 
-    page = await context.new_page()
-    page.on("response", handle_response)
-
+    page = None
     start_time = datetime.now()
     try:
+        page = await context.new_page()
+        page.on("response", handle_response)
+
         # 3. 导航逻辑：如果是纯域名，默认拼入 /dashboard 触发控制台；如果是带有路径的精确控制台 URL，则直接直达
         parsed_web = urlparse(web_url)
         path = parsed_web.path.strip("/")
@@ -553,13 +554,21 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
 
             group_ratio = pricing_data.get("group_ratio", {})
             usable_group = pricing_data.get("usable_group", {})
+            if not isinstance(group_ratio, dict):
+                group_ratio = {}
+            if not isinstance(usable_group, dict):
+                usable_group = {}
             if group_ratio:
                 groups = {}
                 for grp_id, grp_ratio in group_ratio.items():
                     grp_name = usable_group.get(grp_id) or grp_id
+                    try:
+                        ratio_val = float(grp_ratio)
+                    except (ValueError, TypeError):
+                        ratio_val = 1.0
                     groups[grp_id] = {
                         "name": grp_name,
-                        "ratio": float(grp_ratio)
+                        "ratio": ratio_val
                     }
                 result["groups_info"] = groups
 
@@ -574,9 +583,13 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                         if isinstance(grp_info, dict):
                             grp_name = grp_info.get("desc") or grp_id
                             grp_ratio = grp_info.get("ratio", 1.0)
+                            try:
+                                ratio_val = float(grp_ratio)
+                            except (ValueError, TypeError):
+                                ratio_val = 1.0
                             groups[grp_id] = {
                                 "name": grp_name,
-                                "ratio": float(grp_ratio)
+                                "ratio": ratio_val
                             }
                     if groups:
                         result["groups_info"] = groups
@@ -593,9 +606,13 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                             grp_name = grp.get("name")
                             grp_ratio = grp.get("rate_multiplier", 1.0)
                             if grp_name:
+                                try:
+                                    ratio_val = float(grp_ratio)
+                                except (ValueError, TypeError):
+                                    ratio_val = 1.0
                                 groups[grp_name] = {
                                     "name": grp_name,
-                                    "ratio": float(grp_ratio) if grp_ratio is not None else 1.0
+                                    "ratio": ratio_val
                                 }
                     if groups:
                         result["groups_info"] = groups
@@ -712,7 +729,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
         if result["status"] == "online" and result["balance"] is None:
             parsed = urlparse(base_url)
             host = parsed.netloc.lower() or base_url.lower()
-            if "nvidia.com" not in host:
+            if "nvidia.com" not in host and page:
                 try:
                     debug_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "debug_screenshots")
                     os.makedirs(debug_dir, exist_ok=True)
@@ -721,7 +738,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     print(f"[health_checker] 站点 {host} 余额为 None 且为 online，已保存截图至: {screenshot_path}")
                 except Exception as se:
                     print(f"[health_checker] 保存 debug 截图失败: {se}")
-        await page.close()
+        if page:
+            await page.close()
 
     # Force 0.2x ratio override for xiaoleai.team / aicards.shop
     base_url_lower = station.get("base_url", "").lower()
