@@ -1,0 +1,57 @@
+{
+  "api.qlhazycoder.top": {
+    "balance_path": "/wallet",
+    "balance_label": "当前余额"
+  },
+  "api-public.proxy-gls.de5.net": {
+    "balance_path": "/wallet",
+    "balance_label": "当前余额"
+  },
+  "api.twgom.com": {
+    "balance_path": "/wallet"
+  },
+  "api.xiaoleai.team": {
+    "balance_path": "/user/dashboard",
+    "balance_label": "可用余额"
+  },
+  "api.deepseek.com": {
+    "balance_path": "/usage",
+    "balance_label": "充值余额"
+  },
+  "anyrouter.top": {
+    "balance_path": "/console",
+    "balance_label": "当前余额"
+  },
+  "baiyuan.cc.cd": {
+    "balance_path": "/wallet",
+    "balance_label": "当前余额"
+  },
+  "cheapyun.cc.cd": {
+    "balance_path": "/console",
+    "balance_label": "当前余额"
+  },
+  "newapi.prorisehub.com": {
+    "balance_path": "/wallet",
+    "balance_label": "当前余额"
+  },
+  "vsllm.com": {
+    "balance_path": "/console",
+    "balance_label": "当前余额"
+  },
+  "api.freemodel.dev": {
+    "balance_path": "/dashboard/usage",
+    "balance_label": "当前余额"
+  },
+  "owen891.cc.cd": {
+    "balance_path": "/dashboard/overview",
+    "balance_label": "剩余额度"
+  },
+  "paidyun.cc.cd": {
+    "balance_path": "/console",
+    "balance_label": "当前余额"
+  },
+  "dongtoken.com": {
+    "balance_path": "/console",
+    "balance_label": "当前余额"
+  }
+}

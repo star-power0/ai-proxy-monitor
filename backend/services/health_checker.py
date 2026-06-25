@@ -14,7 +14,32 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 CDP_URL = "http://127.0.0.1:9222"
-PROBE_CACHE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "probe_cache.json"))
+
+
+def _resolve_probe_cache_path() -> str:
+    """
+    Resolve the writable probe_cache.json path.
+    - Source mode: project_root/data/probe_cache.json
+    - Packaged (PyInstaller) mode: <exe_dir>/data/probe_cache.json
+      On first run, seed it from the bundled factory preset in _MEIPASS.
+    """
+    if hasattr(sys, "_MEIPASS"):
+        user_path = os.path.join(os.path.dirname(sys.executable), "data", "probe_cache.json")
+        if not os.path.exists(user_path):
+            seed = os.path.join(sys._MEIPASS, "data", "probe_cache.json")
+            if os.path.exists(seed):
+                try:
+                    os.makedirs(os.path.dirname(user_path), exist_ok=True)
+                    with open(seed, "r", encoding="utf-8") as src, \
+                         open(user_path, "w", encoding="utf-8") as dst:
+                        dst.write(src.read())
+                except Exception:
+                    pass
+        return user_path
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "probe_cache.json"))
+
+
+PROBE_CACHE_PATH = _resolve_probe_cache_path()
 
 BALANCE_KEYS = [
     "balance",
@@ -135,12 +160,16 @@ def _save_probe_cache(cache: dict):
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
-def _remember_balance_path(host: str, url: str):
+def _remember_balance_path(host: str, url: str, label: str | None = None):
+    """Remember the path (and optionally the label) that successfully yielded a balance."""
     parsed = urlparse(url)
     if not parsed.netloc:
         return
     cache = _load_probe_cache()
-    cache.setdefault(host, {})["balance_path"] = parsed.path or "/"
+    entry = cache.setdefault(host, {})
+    entry["balance_path"] = parsed.path or "/"
+    if label:
+        entry["balance_label"] = label
     _save_probe_cache(cache)
 
 
@@ -152,6 +181,12 @@ def _get_cached_probe_url(host: str, web_url: str):
     parsed = urlparse(web_url)
     root = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
     return f"{root}/{cached_path.strip('/')}".rstrip("/")
+
+
+def _get_cached_balance_label(host: str) -> str | None:
+    """Return the previously-successful balance label for this host, if any."""
+    cache = _load_probe_cache()
+    return cache.get(host, {}).get("balance_label")
 
 
 def _get_web_url(station: dict) -> str:
@@ -208,34 +243,99 @@ def _build_probe_urls(web_url: str, cached_url: str | None = None) -> list[str]:
         urls.append(cached_url.rstrip("/"))
     if parsed.path and parsed.path != "/":
         urls.append(web_url.rstrip("/"))
-    for path in ("/dashboard", "/console", "/wallet", "/topup", "/profile", "/"):
+    common_paths = (
+        "/dashboard", "/console", "/wallet", "/topup", "/profile",
+        "/user/asset-source", "/user/dashboard", "/user/wallet",
+        "/user/profile", "/account", "/account/billing", "/billing",
+        "/",
+    )
+    for path in common_paths:
         urls.append(f"{root}{path}".rstrip("/"))
     return list(dict.fromkeys(urls))
 
 
-def _extract_dom_balance_text(text: str):
-    if not text:
-        return None
-    labels = "当前余额|账户余额|剩余余额|可用余额|充值余额|信用余额|余额|剩余额度|可用额度|剩余额度|可用积分|剩余金额|Balance|Quota|Credit|额度"
-    pattern = re.compile(rf"(?:{labels})[\s\S]{{0,40}}?(?:¥|￥|\$)?\s*([0-9][0-9,]*(?:\.\d+)?)", re.IGNORECASE)
-    candidates = []
-    for match in pattern.finditer(text):
-        snippet = match.group(0)
-        if any(word in snippet for word in ("小时", "天", "限制", "重置", "窗口", "上限", "请求", "次数", "Tokens", "RPM", "TPM")):
-            continue
-        # Filter out promotional / pricing text
-        if any(word in snippet for word in ("满", "送", "减", "赠", "折", "优惠", "抢", "仅需", "起", "元/月", "元/年", "充值送", "消费", "冻结", "锁定")):
-            continue
-        # Real balance displays are short; long snippets are likely marketing copy
-        if len(snippet) > 30:
-            continue
-        try:
-            candidates.append(float(match.group(1).replace(",", "")))
-        except ValueError:
-            continue
-    if candidates:
-        return min(candidates)
-    return None
+async def _extract_dom_balance_via_dom(page, preferred_label: str | None = None):
+    """
+    DOM-level balance extraction (v5).
+    Walks all visible text nodes in DOM order. When a node contains a known
+    balance label, scans the next ~30 text nodes (or 400 chars) for the
+    first valid number. Returns {value, label} dict or None.
+
+    A previously-successful label (from probe_cache.json) gets a +1000
+    priority boost so once a host has been mapped, that mapping is sticky.
+    """
+    return await page.evaluate("""(preferredLabel) => {
+        const LABEL_PRIORITY = {
+            '当前余额': 100, '账户余额': 100, '账号余额': 100,
+            '个人余额': 90, '我的余额': 90, '可用余额': 90,
+            '钱包余额': 85, 'Token余额': 85, '剩余余额': 85,
+            '充值余额': 80,
+            '账户额度': 70, '账户余款': 70, '账户金额': 70,
+            '剩余额度': 65, '可用额度': 65,
+            '剩余配额': 55, '可用配额': 55,
+            '点数余额': 50, '剩余金额': 50,
+            '我的资产': 60, '账户资产': 60, '总资产': 55,
+            '金币池': 50, '我的金币': 50, '积分余额': 55, '点数': 45,
+            'Balance': 60, 'Credits': 50, 'Credit': 50,
+            'Quota': 40, 'Remaining': 50, 'Available': 45,
+            '余额': 30, '额度': 25
+        };
+        const LABELS = Object.keys(LABEL_PRIORITY).sort((a, b) => b.length - a.length);
+
+        const NUM_RE = /([0-9][0-9,]*(?:\\.\\d+)?)/;
+        const BAD_WORDS = ['满', '送', '减', '赠', '折', '优惠', '抢', '仅需',
+                           '充值送', '冻结', '限时', '活动', '套餐', '即可'];
+
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let n;
+        while ((n = walker.nextNode())) {
+            const t = (n.textContent || '').trim();
+            if (!t) continue;
+            const tag = n.parentElement && n.parentElement.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+            nodes.push(t);
+        }
+
+        function findLabelIn(txt) {
+            for (const lbl of LABELS) {
+                if (txt.includes(lbl)) return lbl;
+            }
+            return null;
+        }
+
+        const candidates = [];
+        for (let i = 0; i < nodes.length; i++) {
+            const txt = nodes[i];
+            const label = findLabelIn(txt);
+            if (!label) continue;
+
+            const labelIdx = txt.indexOf(label);
+            let ctx = txt.slice(labelIdx + label.length);
+            for (let j = 1; j <= 30 && i + j < nodes.length; j++) {
+                ctx += ' ' + nodes[i + j];
+                if (ctx.length > 400) break;
+            }
+            ctx = ctx.slice(0, 400);
+
+            const m = ctx.match(NUM_RE);
+            if (!m) continue;
+            const v = parseFloat(m[1].replace(/,/g, ''));
+            if (isNaN(v) || v > 1000000) continue;
+
+            const beforeNum = ctx.slice(0, m.index);
+            if (BAD_WORDS.some(w => beforeNum.includes(w))) continue;
+
+            let priority = LABEL_PRIORITY[label] || 0;
+            if (preferredLabel && label === preferredLabel) priority += 1000;
+
+            candidates.push({ value: v, label, priority, domOrder: i });
+        }
+
+        if (candidates.length === 0) return null;
+        candidates.sort((a, b) => b.priority - a.priority || a.domOrder - b.domOrder);
+        return { value: candidates[0].value, label: candidates[0].label };
+    }""", preferred_label)
 
 
 def _extract_dom_groups_text(text: str) -> dict:
@@ -633,7 +733,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
         final_dom_text = await page.evaluate("() => document.body.innerText")
         if result["balance"] is None:
             probe_urls = _build_probe_urls(web_url, cached_probe_url)
-            dom_texts = [final_dom_text]
+            balance_trace = []  # diagnostic trace for debugging
             for probe_url in probe_urls:
                 try:
                     if page.url.rstrip("/") != probe_url.rstrip("/"):
@@ -642,48 +742,79 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     # Retry up to 3 times: SPA pages may need extra time to render balance
                     for _retry in range(3):
                         await asyncio.sleep(1.5 if _retry > 0 else 1.0)
-                        dom_text = await page.evaluate("""async () => {
-                            for (let i = 0; i < 20; i++) {
-                                const text = document.body.innerText;
-                                const hasPasswordInput = !!document.querySelector('input[type="password"]');
-                                const hasLoggedInMenu = text.includes("数据看板") ||
-                                                        text.includes("个人设置") ||
-                                                        text.includes("API令牌") ||
-                                                        text.includes("令牌管理") ||
-                                                        text.includes("控制台") ||
-                                                        text.includes("钱包") ||
-                                                        text.includes("账户数据") ||
-                                                        text.includes("使用日志") ||
-                                                        text.includes("我的余额") ||
-                                                        text.includes("账户信息");
-                                const isLoginPage = hasPasswordInput ||
-                                                    (!hasLoggedInMenu && (
-                                                        (text.includes("登录") || text.includes("Sign in")) &&
-                                                        (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
-                                                    ));
-                                if (isLoginPage) return "";
-                                if (hasLoggedInMenu && (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota"))) {
-                                    return text;
-                                }
-                                await new Promise(r => setTimeout(r, 200));
-                            }
-                            return document.body.innerText;
+                        # Login-gate check: skip if this is clearly a login page
+                        page_state = await page.evaluate("""() => {
+                            const raw = document.body.innerText;
+                            const text = raw;
+                            const textLower = raw.toLowerCase();
+                            const hasPasswordInput = !!document.querySelector('input[type="password"]');
+                            const LOGGED_IN_KW_CN = [
+                                '数据看板','个人设置','API令牌','API 令牌','API密钥','API 密钥',
+                                '令牌管理','控制台','钱包','账户数据','使用日志','我的余额',
+                                '账户信息','账户中心','个人中心','用户中心','资产来源','资产明细',
+                                '退出登录','退出账号','退出账户',
+                                '我的卡密','卡密管理','邀请','签到','充值','账单','用量信息',
+                                '接口文档','产品定价','实用集成','个人信息','仪表盘','仪表板',
+                                '资产管理','额度记录','额度管理','使用统计','在线充值'
+                            ];
+                            const LOGGED_IN_KW_EN = [
+                                'sign out','log out','logout','dashboard','api keys','api key',
+                                'billing','account','profile','usage','api tokens','my account'
+                            ];
+                            const hasLoggedInMenu =
+                                LOGGED_IN_KW_CN.some(k => text.includes(k)) ||
+                                LOGGED_IN_KW_EN.some(k => textLower.includes(k));
+                            const isLoginPage = hasPasswordInput ||
+                                (!hasLoggedInMenu && (text.includes('登录') || text.includes('Sign in')) &&
+                                 (text.includes('注册') || text.includes('Register') ||
+                                  text.includes('OIDC') || text.includes('dc.hhhl.cc')));
+                            return { isLoginPage, hasLoggedInMenu };
                         }""")
-                        if not dom_text:
+                        if page_state.get("isLoginPage"):
+                            balance_trace.append(f"{probe_url}#r{_retry}:login_page")
                             break
-                        dom_balance = _extract_dom_balance_text(dom_text)
-                        if dom_balance is not None:
-                            result["balance"] = dom_balance
-                            final_dom_text = dom_text
-                            _remember_balance_path(host, page.url)
+                        if not page_state.get("hasLoggedInMenu"):
+                            balance_trace.append(f"{probe_url}#r{_retry}:no_logged_in_menu")
+                            continue  # Not authenticated yet — retry
+                        # Authenticated: try DOM-level balance extraction
+                        cached_label = _get_cached_balance_label(host)
+                        dom_result = await _extract_dom_balance_via_dom(page, cached_label)
+                        if dom_result is not None:
+                            result["balance"] = dom_result["value"]
+                            final_dom_text = await page.evaluate("() => document.body.innerText")
+                            _remember_balance_path(host, page.url, dom_result.get("label"))
+                            balance_trace.append(
+                                f"{probe_url}#r{_retry}:HIT={dom_result['value']}({dom_result.get('label')})"
+                            )
                             break
-                        _balance_hints = ("当前余额", "账户余额", "余额", "剩余额度", "可用额度", "Balance", "Quota", "Credit", "额度")
-                        if any(hint in dom_text for hint in _balance_hints):
-                            dom_texts.append(dom_text)
+                        balance_trace.append(f"{probe_url}#r{_retry}:logged_in_no_match")
+                        # Diagnostic: on last retry of a probe URL, dump short snippets
+                        # around currency symbols / digits so we can see what label is used.
+                        if _retry == 2:
+                            try:
+                                hints = await page.evaluate("""() => {
+                                    const txt = document.body.innerText || '';
+                                    const out = [];
+                                    // Find all $/¥ amounts and grab 25 chars before them
+                                    const re = /(?:¥|￥|\\$)\\s*[0-9][0-9,.]*/g;
+                                    let m;
+                                    while ((m = re.exec(txt)) !== null && out.length < 6) {
+                                        const start = Math.max(0, m.index - 25);
+                                        out.push(txt.slice(start, m.index + m[0].length).replace(/\\s+/g, ' '));
+                                    }
+                                    return out;
+                                }""")
+                                if hints:
+                                    print(f"[balance_hint] {host} @ {probe_url}: {hints}")
+                            except Exception:
+                                pass
                     if result["balance"] is not None:
                         break
-                except Exception:
+                except Exception as e:
+                    balance_trace.append(f"{probe_url}:exc={type(e).__name__}")
                     continue
+            if result["balance"] is None and balance_trace:
+                print(f"[balance_trace] {host}: {' | '.join(balance_trace)}")
 
         if not result["groups_info"]:
             dom_groups = _extract_dom_groups_text(final_dom_text)
@@ -745,8 +876,14 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
         result["status_reason"] = f"网页加载异常: {str(exc)}"
         result["error"] = str(exc)
     finally:
-        # 如果是 online 状态但最终依然未获得有效余额，对其保存排查截图
-        if result["status"] == "online" and result["balance"] is None:
+        # Save debug screenshot only when we confirmed login but still couldn't get balance.
+        # Skip the snapshot for sites that are simply unreachable or never authenticated.
+        should_screenshot = (
+            result["status"] == "online"
+            and result["balance"] is None
+            and result.get("groups_info")  # implies API/login succeeded enough to learn groups
+        )
+        if should_screenshot:
             parsed = urlparse(base_url)
             host = parsed.netloc.lower() or base_url.lower()
             if "nvidia.com" not in host and page:
