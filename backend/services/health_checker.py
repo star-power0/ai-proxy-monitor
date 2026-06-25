@@ -570,7 +570,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                         "name": grp_name,
                         "ratio": ratio_val
                     }
-                result["groups_info"] = groups
+                if groups:
+                    result["groups_info"] = groups
 
         # 6.2.2 从 /api/user/self/groups 提取真实分组与倍率 (New-API / One-API 特性)
         if fetched_data and fetched_data.get("groups"):
