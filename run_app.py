@@ -139,7 +139,16 @@ def main():
 
 
     def init_window():
-        pass
+        # Center the window on the primary monitor
+        try:
+            user32 = ctypes.windll.user32
+            screen_w = user32.GetSystemMetrics(0)
+            screen_h = user32.GetSystemMetrics(1)
+            x = (screen_w - 1520) // 2
+            y = (screen_h - 920) // 2
+            window.move(x, y)
+        except Exception:
+            pass
 
     webview.start(init_window)
 
