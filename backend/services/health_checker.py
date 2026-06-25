@@ -565,7 +565,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     try:
                         ratio_val = float(grp_ratio)
                     except (ValueError, TypeError):
-                        ratio_val = 1.0
+                        continue
                     groups[grp_id] = {
                         "name": grp_name,
                         "ratio": ratio_val
@@ -586,7 +586,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                             try:
                                 ratio_val = float(grp_ratio)
                             except (ValueError, TypeError):
-                                ratio_val = 1.0
+                                continue
                             groups[grp_id] = {
                                 "name": grp_name,
                                 "ratio": ratio_val
@@ -604,16 +604,17 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     for grp in groups_list:
                         if isinstance(grp, dict):
                             grp_name = grp.get("name")
+                            if not grp_name:
+                                continue
                             grp_ratio = grp.get("rate_multiplier", 1.0)
-                            if grp_name:
-                                try:
-                                    ratio_val = float(grp_ratio)
-                                except (ValueError, TypeError):
-                                    ratio_val = 1.0
-                                groups[grp_name] = {
-                                    "name": grp_name,
-                                    "ratio": ratio_val
-                                }
+                            try:
+                                ratio_val = float(grp_ratio)
+                            except (ValueError, TypeError):
+                                continue
+                            groups[grp_name] = {
+                                "name": grp_name,
+                                "ratio": ratio_val
+                            }
                     if groups:
                         result["groups_info"] = groups
 
