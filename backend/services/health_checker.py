@@ -473,7 +473,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
             } catch(e) {}
 
             // 1. 同源 fetch 常见用户接口
-            for (const endpoint of ['/api/user/self', '/api/user/info', '/api/user/dashboard', '/api/user/quota', '/api/user/token', '/api/v1/auth/me']) {
+            for (const endpoint of ['/api/user/self', '/api/user/info', '/api/user/dashboard', '/api/user/quota', '/api/user/token', '/api/user/balance', '/api/billing/info', '/api/v1/auth/me', '/api/me']) {
                 try {
                     const r = await fetch(endpoint, { headers, credentials: 'same-origin' });
                     if (r.ok) {
@@ -642,14 +642,17 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                                                     text.includes("控制台") ||
                                                     text.includes("钱包") ||
                                                     text.includes("账户数据") ||
-                                                    text.includes("使用日志");
+                                                    text.includes("使用日志") ||
+                                                    text.includes("我的余额") ||
+                                                    text.includes("账户信息");
                             const isLoginPage = hasPasswordInput ||
                                                 (!hasLoggedInMenu && (
                                                     (text.includes("登录") || text.includes("Sign in")) &&
                                                     (text.includes("注册") || text.includes("Register") || text.includes("OIDC") || text.includes("dc.hhhl.cc"))
                                                 ));
                             if (isLoginPage) return "";
-                            if (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota")) {
+                            // Only extract balance if page confirms user is logged in
+                            if (hasLoggedInMenu && (text.includes("当前余额") || text.includes("账户余额") || text.includes("余额") || text.includes("剩余配额") || text.includes("剩余额度") || text.includes("Balance") || text.includes("Quota"))) {
                                 return text;
                             }
                             await new Promise(r => setTimeout(r, 200));
