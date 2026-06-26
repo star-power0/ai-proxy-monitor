@@ -53,5 +53,31 @@
   "dongtoken.com": {
     "balance_path": "/console",
     "balance_label": "当前余额"
+  },
+  "pulseaify.com": {
+    "balance_path": "/dashboard"
+  },
+  "rayplus.site": {
+    "balance_path": "/dashboard"
+  },
+  "api.wluvyh.cloud": {
+    "balance_path": "/dashboard"
+  },
+  "api.ssstoken.net": {
+    "balance_path": "/dashboard"
+  },
+  "sub.anzhiyu.com": {
+    "balance_path": "/dashboard",
+    "balance_label": "充值余额"
+  },
+  "bizdecipher.com": {
+    "balance_path": "/dashboard",
+    "balance_label": "账户余额"
+  },
+  "api.tokenskingdom.com": {
+    "balance_path": "/dashboard"
+  },
+  "danhuang.cc.cd": {
+    "balance_path": "/dashboard"
   }
 }

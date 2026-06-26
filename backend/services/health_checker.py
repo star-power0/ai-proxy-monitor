@@ -169,7 +169,7 @@ def _remember_balance_path(host: str, url: str, label: str | None = None):
     cache = _load_probe_cache()
     entry = cache.setdefault(host, {})
     entry["balance_path"] = parsed.path or "/"
-    if label:
+    if label and label not in {"余额", "额度"}:
         entry["balance_label"] = label
     _save_probe_cache(cache)
 
@@ -257,15 +257,16 @@ def _build_probe_urls(web_url: str, cached_url: str | None = None) -> list[str]:
 
 async def _extract_dom_balance_via_dom(page, preferred_label: str | None = None):
     """
-    DOM-level balance extraction (v5).
-    Walks all visible text nodes in DOM order. When a node contains a known
-    balance label, scans the next ~30 text nodes (or 400 chars) for the
-    first valid number. Returns {value, label} dict or None.
+    DOM-level balance extraction (v6).
+    Walks visible text nodes in DOM order. When a node contains a known
+    balance label, first extracts the amount from the smallest nearby
+    container; only non-preferred labels fall back to scanning later nodes.
+    Returns {value, label} dict or None.
 
-    A previously-successful label (from probe_cache.json) gets a +1000
+    A precise previously-successful label (from probe_cache.json) gets a
     priority boost so once a host has been mapped, that mapping is sticky.
     """
-    return await page.evaluate("""(preferredLabel) => {
+    return await page.evaluate(r"""(preferredLabel) => {
         const LABEL_PRIORITY = {
             '当前余额': 100, '账户余额': 100, '账号余额': 100,
             '个人余额': 90, '我的余额': 90, '可用余额': 90,
@@ -283,7 +284,7 @@ async def _extract_dom_balance_via_dom(page, preferred_label: str | None = None)
         };
         const LABELS = Object.keys(LABEL_PRIORITY).sort((a, b) => b.length - a.length);
 
-        const NUM_RE = /([0-9][0-9,]*(?:\\.\\d+)?)/;
+        const NUM_RE = /(?:¥|￥|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)/;
         const BAD_WORDS = ['满', '送', '减', '赠', '折', '优惠', '抢', '仅需',
                            '充值送', '冻结', '限时', '活动', '套餐', '即可'];
 
@@ -295,7 +296,7 @@ async def _extract_dom_balance_via_dom(page, preferred_label: str | None = None)
             if (!t) continue;
             const tag = n.parentElement && n.parentElement.tagName;
             if (tag === 'SCRIPT' || tag === 'STYLE') continue;
-            nodes.push(t);
+            nodes.push({ text: t, el: n.parentElement });
         }
 
         function findLabelIn(txt) {
@@ -305,32 +306,55 @@ async def _extract_dom_balance_via_dom(page, preferred_label: str | None = None)
             return null;
         }
 
+        function validNumberFromContext(ctx) {
+            const m = ctx.match(NUM_RE);
+            if (!m) return null;
+            const v = parseFloat(m[1].replace(/,/g, ''));
+            if (isNaN(v) || v > 1000000) return null;
+            const beforeNum = ctx.slice(0, m.index);
+            if (BAD_WORDS.some(w => beforeNum.includes(w))) return null;
+            return v;
+        }
+
         const candidates = [];
         for (let i = 0; i < nodes.length; i++) {
-            const txt = nodes[i];
+            const node = nodes[i];
+            const txt = node.text;
             const label = findLabelIn(txt);
             if (!label) continue;
 
             const labelIdx = txt.indexOf(label);
+            let priority = LABEL_PRIORITY[label] || 0;
+            if (preferredLabel && label === preferredLabel && !['余额', '额度'].includes(preferredLabel)) priority += 1000;
+
+            // Prefer the smallest ancestor that contains both the exact label and a number.
+            // This keeps balance extraction inside the balance card and avoids later recharge amounts.
+            let el = node.el;
+            for (let depth = 0; el && depth <= 5; depth++, el = el.parentElement) {
+                const containerText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                const containerLabelIdx = containerText.indexOf(label);
+                if (containerLabelIdx < 0) continue;
+                const ctx = containerText.slice(containerLabelIdx + label.length, containerLabelIdx + label.length + 80);
+                const v = validNumberFromContext(ctx);
+                if (v !== null) {
+                    candidates.push({ value: v, label, priority: priority + 500 - depth, domOrder: i });
+                    break;
+                }
+            }
+
+            if (preferredLabel && label === preferredLabel && !['余额', '额度'].includes(preferredLabel)) continue;
+
             let ctx = txt.slice(labelIdx + label.length);
             for (let j = 1; j <= 30 && i + j < nodes.length; j++) {
-                ctx += ' ' + nodes[i + j];
+                ctx += ' ' + nodes[i + j].text;
                 if (ctx.length > 400) break;
             }
             ctx = ctx.slice(0, 400);
 
-            const m = ctx.match(NUM_RE);
-            if (!m) continue;
-            const v = parseFloat(m[1].replace(/,/g, ''));
-            if (isNaN(v) || v > 1000000) continue;
-
-            const beforeNum = ctx.slice(0, m.index);
-            if (BAD_WORDS.some(w => beforeNum.includes(w))) continue;
-
-            let priority = LABEL_PRIORITY[label] || 0;
-            if (preferredLabel && label === preferredLabel) priority += 1000;
-
-            candidates.push({ value: v, label, priority, domOrder: i });
+            const v = validNumberFromContext(ctx);
+            if (v !== null) {
+                candidates.push({ value: v, label, priority, domOrder: i });
+            }
         }
 
         if (candidates.length === 0) return null;
@@ -394,6 +418,10 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
     web_url = _get_web_url(station)
     host = parsed_url.netloc.lower() or base_url.lower()
     cached_probe_url = _get_cached_probe_url(host, web_url)
+    cached_balance_label = _get_cached_balance_label(host)
+    prefer_dom_balance = bool(cached_balance_label)
+    api_balance = None
+    balance_source = None
 
     result = {
         "status": "unknown",
@@ -649,9 +677,7 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
         # 6. 处理截获到的数据
         # 6.1 余额提取
         if user_data:
-            balance = _extract_balance(user_data)
-            if balance is not None:
-                result["balance"] = balance
+            api_balance = _extract_balance(user_data)
             models = _extract_user_models(user_data)
             if models:
                 result["available_models"] = models
@@ -734,6 +760,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
         final_dom_text = await page.evaluate("() => document.body.innerText")
         if result["balance"] is None:
             probe_urls = _build_probe_urls(web_url, cached_probe_url)
+            if api_balance is not None and not prefer_dom_balance:
+                probe_urls = probe_urls[:1]
             balance_trace = []  # diagnostic trace for debugging
             for probe_url in probe_urls:
                 try:
@@ -741,7 +769,9 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                         await page.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
                     await _dismiss_page_overlays(page)
                     # Retry up to 3 times: SPA pages may need extra time to render balance
-                    for _retry in range(3):
+                    probe_dom_result = None
+                    retry_count = 3 if prefer_dom_balance else (2 if api_balance is not None else 3)
+                    for _retry in range(retry_count):
                         await asyncio.sleep(1.5 if _retry > 0 else 1.0)
                         # Login-gate check: skip if this is clearly a login page
                         page_state = await page.evaluate("""() => {
@@ -778,16 +808,13 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                             balance_trace.append(f"{probe_url}#r{_retry}:no_logged_in_menu")
                             continue  # Not authenticated yet — retry
                         # Authenticated: try DOM-level balance extraction
-                        cached_label = _get_cached_balance_label(host)
-                        dom_result = await _extract_dom_balance_via_dom(page, cached_label)
+                        dom_result = await _extract_dom_balance_via_dom(page, cached_balance_label)
                         if dom_result is not None:
-                            result["balance"] = dom_result["value"]
-                            final_dom_text = await page.evaluate("() => document.body.innerText")
-                            _remember_balance_path(host, page.url, dom_result.get("label"))
+                            probe_dom_result = dom_result
                             balance_trace.append(
                                 f"{probe_url}#r{_retry}:HIT={dom_result['value']}({dom_result.get('label')})"
                             )
-                            break
+                            continue
                         balance_trace.append(f"{probe_url}#r{_retry}:logged_in_no_match")
                         # Diagnostic: on last retry of a probe URL, dump short snippets
                         # around currency symbols / digits so we can see what label is used.
@@ -809,6 +836,11 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                                     print(f"[balance_hint] {host} @ {probe_url}: {hints}")
                             except Exception:
                                 pass
+                    if probe_dom_result is not None:
+                        result["balance"] = probe_dom_result["value"]
+                        balance_source = "dom"
+                        final_dom_text = await page.evaluate("() => document.body.innerText")
+                        _remember_balance_path(host, page.url, probe_dom_result.get("label"))
                     if result["balance"] is not None:
                         break
                 except Exception as e:
@@ -816,6 +848,10 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
                     continue
             if result["balance"] is None and balance_trace:
                 print(f"[balance_trace] {host}: {' | '.join(balance_trace)}")
+
+        if result["balance"] is None and api_balance is not None and not prefer_dom_balance:
+            result["balance"] = api_balance
+            balance_source = "api"
 
         if not result["groups_info"]:
             dom_groups = _extract_dom_groups_text(final_dom_text)
@@ -830,9 +866,8 @@ async def check_station_health_with_playwright(context, station: dict) -> dict:
             if result["balance"] is not None: captured.append("余额")
             
             # 判断余额的真正来源以精确标记
-            is_api_balance = (result["balance"] is not None and user_data and _extract_balance(user_data) is not None)
-            source_type = "API 抓取" if is_api_balance or (result["balance"] is None) else "DOM 提取"
-            
+            source_type = "DOM 提取" if balance_source == "dom" else "API 抓取"
+
             result["status_reason"] = f"已验证（{source_type}：{'、'.join(captured)}）"
         else:
             if title:
